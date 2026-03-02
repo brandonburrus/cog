@@ -1,0 +1,25 @@
+{
+  "name": "cog",
+  "version": "0.0.1",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/mcp.ts --noEmit --target=bun",
+    "biome": "biome check --fix"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@pinecone-database/pinecone": "^7.1.0",
+    "fastmcp": "^3.33.0",
+    "gray-matter": "^4.0.3",
+    "ollama": "^0.6.3",
+    "zod": "^4.3.6"
+  }
+}

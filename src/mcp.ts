@@ -8,7 +8,10 @@ import z from 'zod'
 
 const container = createContainer<{ brain: Brain }>()
 container.register({
-  memoryIndex: asValue(new Pinecone().Index(env.PINECODE_INDEX_NAME)),
+  memoryIndex: asValue(new Pinecone().Index({
+    name: env.PINECODE_INDEX_NAME,
+    host: env.PINECONE_HOST,
+  })),
   ollama: asValue(new Ollama({ host: 'http://localhost:11434' })),
   memoryPath: asValue(env.MEMORY_PATH.replace('~', process.env.HOME ?? '')),
   brain: asClass(Brain).singleton(),
@@ -23,7 +26,7 @@ const mcp = new FastMCP({
 mcp.addTool({
   name: 'create-memory',
   description: 'Remember information, strategies, patterns, and insights for future reference',
-  timeoutMs: 4_000,
+  timeoutMs: 20_000,
   parameters: memorySchema,
   async execute(memory: Memory) {
     try {
@@ -69,7 +72,7 @@ mcp.addTool({
   name: 'retrieve-memory',
   description:
     'Recall information, strategies, patterns, and insights that were previously remembered',
-  timeoutMs: 4_000,
+  timeoutMs: 20_000,
   parameters: z.object({
     memoryName: z.string().describe('The name of the memory to retrieve'),
   }),
@@ -89,7 +92,7 @@ mcp.addTool({
   name: 'search-memory',
   description:
     'Search for memories semantically relevant to a query. Returns memory names, keywords, similarity scores, and content sorted by relevance.',
-  timeoutMs: 10_000,
+  timeoutMs: 20_000,
   parameters: z.object({
     query: z.string().describe('Natural language query to search memories by'),
     topK: z
@@ -109,4 +112,8 @@ mcp.addTool({
 
 mcp.start({
   transportType: 'stdio',
+})
+
+brain.reconcile().catch((err: unknown) => {
+  process.stderr.write(`[cog] Reconciliation failed: ${err}\n`)
 })

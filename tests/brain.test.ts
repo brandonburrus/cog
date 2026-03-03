@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach } from 'bun:test'
+import { describe, it, expect, beforeAll, beforeEach, spyOn, afterAll } from 'bun:test'
 import { Brain } from '../src/brain'
 import { Pinecone } from '@pinecone-database/pinecone'
 import { Ollama } from 'ollama'
@@ -9,7 +9,10 @@ import matter from 'gray-matter'
 const ARTIFACTS_DIR = path.join(import.meta.dir, '.artifacts')
 const INDEX_NAME = 'cog-memory-test'
 
-const memoryIndex = new Pinecone().Index(INDEX_NAME, 'http://localhost:5081')
+const memoryIndex = new Pinecone().Index({
+  host: 'http://localhost:5081',
+  name: INDEX_NAME,
+})
 const ollama = new Ollama({ host: 'http://localhost:11434' })
 const brain = new Brain({ memoryIndex, ollama, memoryPath: ARTIFACTS_DIR })
 
@@ -17,8 +20,17 @@ beforeAll(async () => {
   await fs.mkdir(ARTIFACTS_DIR, { recursive: true })
 })
 
+afterAll(async () => {
+  await memoryIndex.deleteAll()
+  const files = await fs.readdir(ARTIFACTS_DIR)
+  await Promise.all(files.map(f => fs.rm(path.join(ARTIFACTS_DIR, f))))
+  await fs.rmdir(ARTIFACTS_DIR)
+})
+
 beforeEach(async () => {
   await memoryIndex.deleteAll()
+  const files = await fs.readdir(ARTIFACTS_DIR)
+  await Promise.all(files.map(f => fs.rm(path.join(ARTIFACTS_DIR, f))))
 })
 
 describe('Brain', () => {
@@ -136,5 +148,137 @@ describe('searchMemories', () => {
     expect(result.score).toBeDefined()
     expect(result.content).toBeDefined()
     expect((result as unknown as Record<string, unknown>).description).toBeUndefined()
+  })
+})
+
+describe('reconcile', () => {
+  const memoryA = {
+    name: 'reconcile-memory-a',
+    description: 'First reconciliation test memory about cloud infrastructure patterns',
+    keywords: ['cloud', 'infrastructure', 'reconcile'],
+    content: 'Content of reconcile memory A: cloud infrastructure patterns and best practices.',
+  }
+
+  const memoryB = {
+    name: 'reconcile-memory-b',
+    description: 'Second reconciliation test memory about database indexing strategies',
+    keywords: ['database', 'indexing', 'reconcile'],
+    content:
+      'Content of reconcile memory B: database indexing strategies for high-throughput systems.',
+  }
+
+  const memoryC = {
+    name: 'reconcile-memory-c',
+    description: 'Third reconciliation test memory about API rate limiting approaches',
+    keywords: ['api', 'rate-limiting', 'reconcile'],
+    content: 'Content of reconcile memory C: API rate limiting approaches and backoff strategies.',
+  }
+
+  it('upserts local-only memories into Pinecone', async () => {
+    // Write markdown files locally but skip Pinecone
+    await brain.saveMemoryMarkdownFile(memoryA)
+    await brain.saveMemoryMarkdownFile(memoryB)
+
+    // Pinecone should be empty before reconcile
+    const beforeIds = await brain.listPineconeVectorIds()
+    expect(beforeIds).toHaveLength(0)
+
+    await brain.reconcile()
+
+    // Both memories should now be searchable in Pinecone
+    const afterIds = await brain.listPineconeVectorIds()
+    expect(afterIds).toContain(memoryA.name)
+    expect(afterIds).toContain(memoryB.name)
+    expect(afterIds).toHaveLength(2)
+  })
+
+  it('deletes Pinecone-only vectors that have no local file', async () => {
+    // Save to both stores normally, then delete the local file to simulate drift
+    await brain.saveMemory(memoryA)
+    await fs.rm(path.join(ARTIFACTS_DIR, `${memoryA.name}.md`))
+
+    // Pinecone has the vector but local file is gone
+    const beforeIds = await brain.listPineconeVectorIds()
+    expect(beforeIds).toContain(memoryA.name)
+    const localBefore = await brain.listLocalMemoryNames()
+    expect(localBefore).toHaveLength(0)
+
+    await brain.reconcile()
+
+    // Orphaned vector should be removed from Pinecone
+    const afterIds = await brain.listPineconeVectorIds()
+    expect(afterIds).not.toContain(memoryA.name)
+    expect(afterIds).toHaveLength(0)
+  })
+
+  it('leaves already-synced memories untouched', async () => {
+    // Save all three memories normally — both stores are in sync
+    await Promise.all([
+      brain.saveMemory(memoryA),
+      brain.saveMemory(memoryB),
+      brain.saveMemory(memoryC),
+    ])
+
+    const beforeIds = (await brain.listPineconeVectorIds()).sort()
+    const beforeLocal = (await brain.listLocalMemoryNames()).sort()
+    expect(beforeIds).toEqual(beforeLocal)
+
+    await brain.reconcile()
+
+    // Both stores should be unchanged
+    const afterIds = (await brain.listPineconeVectorIds()).sort()
+    const afterLocal = (await brain.listLocalMemoryNames()).sort()
+    expect(afterIds).toEqual(beforeIds)
+    expect(afterLocal).toEqual(beforeLocal)
+  })
+
+  it('handles mixed drift: upserts local-only and deletes Pinecone-only in one pass', async () => {
+    // memoryA: in Pinecone only (local file deleted after save)
+    await brain.saveMemory(memoryA)
+    await fs.rm(path.join(ARTIFACTS_DIR, `${memoryA.name}.md`))
+
+    // memoryB: local only (saved to disk, not Pinecone)
+    await brain.saveMemoryMarkdownFile(memoryB)
+
+    // memoryC: in both stores (in sync, should be untouched)
+    await brain.saveMemory(memoryC)
+
+    await brain.reconcile()
+
+    const afterIds = await brain.listPineconeVectorIds()
+    const afterLocal = await brain.listLocalMemoryNames()
+
+    // memoryA orphan should be gone from Pinecone
+    expect(afterIds).not.toContain(memoryA.name)
+    // memoryB should now be in Pinecone
+    expect(afterIds).toContain(memoryB.name)
+    // memoryC should still be present in both
+    expect(afterIds).toContain(memoryC.name)
+    expect(afterLocal).toContain(memoryC.name)
+
+    // Local and Pinecone sets should now match
+    expect(afterIds.sort()).toEqual(afterLocal.sort())
+  })
+
+  it('logs a completion summary to stderr', async () => {
+    await brain.saveMemoryMarkdownFile(memoryA)
+
+    const written: string[] = []
+    const spy = spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      written.push(String(chunk))
+      return true
+    })
+
+    try {
+      await brain.reconcile()
+    } finally {
+      spy.mockRestore()
+    }
+
+    const summary = written.find(line => line.includes('reconcile: complete'))
+    expect(summary).toBeDefined()
+    expect(summary).toContain('+1 upserted')
+    expect(summary).toContain('-0 deleted')
+    expect(summary).toContain('0 errors')
   })
 })

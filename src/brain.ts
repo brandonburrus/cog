@@ -124,6 +124,76 @@ export class Brain {
     }
   }
 
+  async listLocalMemoryNames(): Promise<string[]> {
+    try {
+      const entries = await fs.readdir(this.memoryPath, { withFileTypes: true })
+      return entries.filter(e => e.isFile() && e.name.endsWith('.md')).map(e => e.name.slice(0, -3))
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
+  }
+
+  async listPineconeVectorIds(): Promise<string[]> {
+    const ids: string[] = []
+    let paginationToken: string | undefined
+
+    do {
+      const response = await this.memoryIndex.listPaginated({ paginationToken })
+      for (const item of response.vectors ?? []) {
+        if (item.id) ids.push(item.id)
+      }
+      paginationToken = response.pagination?.next
+    } while (paginationToken)
+
+    return ids
+  }
+
+  async reconcile(): Promise<void> {
+    const [localNames, pineconeIds] = await Promise.all([
+      this.listLocalMemoryNames(),
+      this.listPineconeVectorIds(),
+    ])
+
+    const localSet = new Set(localNames)
+    const pineconeSet = new Set(pineconeIds)
+
+    const toUpsert = localNames.filter(name => !pineconeSet.has(name))
+    const toDelete = pineconeIds.filter(id => !localSet.has(id))
+
+    let upserted = 0
+    let deleted = 0
+    let errors = 0
+
+    for (const name of toUpsert) {
+      try {
+        const memory = await this.retrieveMemoryByName(name)
+        await this.saveMemoryToPinecone(memory)
+        upserted++
+      } catch (err) {
+        errors++
+        process.stderr.write(`[cog] reconcile: failed to upsert "${name}": ${err}\n`)
+      }
+    }
+
+    for (const id of toDelete) {
+      try {
+        await this.memoryIndex.deleteOne({ id })
+        process.stderr.write(
+          `[cog] reconcile: deleted orphaned Pinecone vector "${id}" (no local file)\n`,
+        )
+        deleted++
+      } catch (err) {
+        errors++
+        process.stderr.write(`[cog] reconcile: failed to delete "${id}": ${err}\n`)
+      }
+    }
+
+    process.stderr.write(
+      `[cog] reconcile: complete — +${upserted} upserted, -${deleted} deleted, ${errors} errors\n`,
+    )
+  }
+
   async searchMemories(query: string, topK = 5): Promise<SearchResult[]> {
     const embedding = await this.ollama.embed({
       model: env.OLLAMA_EMBEDDING_MODEL,

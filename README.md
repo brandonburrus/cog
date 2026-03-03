@@ -51,7 +51,7 @@ The following variables are optional and show their defaults:
 | Variable | Default | Description |
 |---|---|---|
 | `MEMORY_PATH` | `~/.config/opencode/memory` | Directory where markdown memory files are stored |
-| `PINECODE_INDEX_NAME` | `cog-memory` | Pinecone index name |
+| `PINECONE_INDEX_NAME` | `cog-memory` | Pinecone index name |
 | `OLLAMA_EMBEDDING_MODEL` | `qwen3-embedding:8b` | Ollama model used for embeddings |
 | `MEMORY_SEARCH_SCORE_THRESHOLD` | `0.7` | Minimum cosine similarity score for search results (0–1) |
 

@@ -9,7 +9,7 @@ import z from 'zod'
 const container = createContainer<{ brain: Brain }>()
 container.register({
   memoryIndex: asValue(new Pinecone().Index({
-    name: env.PINECODE_INDEX_NAME,
+    name: env.PINECONE_INDEX_NAME,
     host: env.PINECONE_HOST,
   })),
   ollama: asValue(new Ollama({ host: 'http://localhost:11434' })),

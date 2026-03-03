@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { FastMCP } from 'fastmcp'
 import { createContainer, asValue, asClass } from 'awilix'
 import { Pinecone } from '@pinecone-database/pinecone'
@@ -8,10 +9,12 @@ import z from 'zod'
 
 const container = createContainer<{ brain: Brain }>()
 container.register({
-  memoryIndex: asValue(new Pinecone().Index({
-    name: env.PINECONE_INDEX_NAME,
-    host: env.PINECONE_HOST,
-  })),
+  memoryIndex: asValue(
+    new Pinecone().Index({
+      name: env.PINECONE_INDEX_NAME,
+      host: env.PINECONE_HOST,
+    }),
+  ),
   ollama: asValue(new Ollama({ host: 'http://localhost:11434' })),
   memoryPath: asValue(env.MEMORY_PATH.replace('~', process.env.HOME ?? '')),
   brain: asClass(Brain).singleton(),

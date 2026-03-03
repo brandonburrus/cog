@@ -1,5 +1,6 @@
 import type { Pinecone } from '@pinecone-database/pinecone'
 import type { Ollama } from 'ollama'
+import type { Logger } from './logger'
 import { z } from 'zod'
 import matter from 'gray-matter'
 import fs from 'node:fs/promises'
@@ -43,17 +44,20 @@ export interface BrainDeps {
   memoryIndex: ReturnType<Pinecone['Index']>
   ollama: Ollama
   memoryPath: string
+  logger: Logger
 }
 
 export class Brain {
   private readonly memoryIndex: BrainDeps['memoryIndex']
   private readonly ollama: BrainDeps['ollama']
   private readonly memoryPath: BrainDeps['memoryPath']
+  private readonly logger: Logger
 
-  constructor({ memoryIndex, ollama, memoryPath }: BrainDeps) {
+  constructor({ memoryIndex, ollama, memoryPath, logger }: BrainDeps) {
     this.memoryIndex = memoryIndex
     this.ollama = ollama
     this.memoryPath = memoryPath
+    this.logger = logger
   }
 
   async saveMemoryMarkdownFile(memory: Memory): Promise<void> {
@@ -63,9 +67,14 @@ export class Brain {
     const filePath = `${this.memoryPath}/${fileName}`
     await fs.mkdir(this.memoryPath, { recursive: true })
     await fs.writeFile(filePath, markdown)
+    this.logger.debug({ name: memory.name, filePath }, 'memory markdown file written')
   }
 
   async createMemoryEmbeddingVectors(memory: Memory): Promise<Vectors> {
+    this.logger.debug(
+      { name: memory.name, model: env.OLLAMA_EMBEDDING_MODEL },
+      'generating embedding',
+    )
     const embedding = await this.ollama.embed({
       model: env.OLLAMA_EMBEDDING_MODEL,
       input: memory.description,
@@ -74,6 +83,7 @@ export class Brain {
     if (!vectors || vectors.length === 0) {
       throw new Error('Failed to create embedding vectors for memory')
     }
+    this.logger.debug({ name: memory.name, dimensions: vectors.length }, 'embedding generated')
     return vectors
   }
 
@@ -90,10 +100,12 @@ export class Brain {
         },
       ],
     })
+    this.logger.debug({ name: memory.name }, 'memory upserted to Pinecone')
   }
 
   async saveMemory(memory: Memory): Promise<void> {
     await Promise.all([this.saveMemoryMarkdownFile(memory), this.saveMemoryToPinecone(memory)])
+    this.logger.debug({ name: memory.name }, 'memory saved')
   }
 
   async retrieveMemoryByName(memoryName: string): Promise<Memory> {
@@ -161,6 +173,8 @@ export class Brain {
     const toUpsert = localNames.filter(name => !pineconeSet.has(name))
     const toDelete = pineconeIds.filter(id => !localSet.has(id))
 
+    this.logger.info({ toUpsert: toUpsert.length, toDelete: toDelete.length }, 'reconcile started')
+
     let upserted = 0
     let deleted = 0
     let errors = 0
@@ -172,26 +186,22 @@ export class Brain {
         upserted++
       } catch (err) {
         errors++
-        process.stderr.write(`[cog] reconcile: failed to upsert "${name}": ${err}\n`)
+        this.logger.error({ name, err }, 'reconcile: failed to upsert memory')
       }
     }
 
     for (const id of toDelete) {
       try {
         await this.memoryIndex.deleteOne({ id })
-        process.stderr.write(
-          `[cog] reconcile: deleted orphaned Pinecone vector "${id}" (no local file)\n`,
-        )
+        this.logger.debug({ id }, 'reconcile: deleted orphaned Pinecone vector (no local file)')
         deleted++
       } catch (err) {
         errors++
-        process.stderr.write(`[cog] reconcile: failed to delete "${id}": ${err}\n`)
+        this.logger.error({ id, err }, 'reconcile: failed to delete Pinecone vector')
       }
     }
 
-    process.stderr.write(
-      `[cog] reconcile: complete — +${upserted} upserted, -${deleted} deleted, ${errors} errors\n`,
-    )
+    this.logger.info({ upserted, deleted, errors }, 'reconcile: complete')
   }
 
   async searchMemories(query: string, topK = 5): Promise<SearchResult[]> {

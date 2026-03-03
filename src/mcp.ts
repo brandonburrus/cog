@@ -5,18 +5,27 @@ import { Pinecone } from '@pinecone-database/pinecone'
 import { Ollama } from 'ollama'
 import { Brain, memorySchema, type Memory, type SearchResult } from './brain'
 import { env } from './env'
+import { logger } from './logger'
 import z from 'zod'
+
+logger.debug(
+  { pineconeHost: env.PINECONE_HOST, index: env.PINECONE_INDEX_NAME },
+  'initializing Pinecone client',
+)
+const memoryIndex = new Pinecone().Index({
+  name: env.PINECONE_INDEX_NAME,
+  host: env.PINECONE_HOST,
+})
+
+logger.debug({ host: 'http://localhost:11434' }, 'initializing Ollama client')
+const ollama = new Ollama({ host: 'http://localhost:11434' })
 
 const container = createContainer<{ brain: Brain }>()
 container.register({
-  memoryIndex: asValue(
-    new Pinecone().Index({
-      name: env.PINECONE_INDEX_NAME,
-      host: env.PINECONE_HOST,
-    }),
-  ),
-  ollama: asValue(new Ollama({ host: 'http://localhost:11434' })),
+  memoryIndex: asValue(memoryIndex),
+  ollama: asValue(ollama),
   memoryPath: asValue(env.MEMORY_PATH.replace('~', process.env.HOME ?? '')),
+  logger: asValue(logger),
   brain: asClass(Brain).singleton(),
 })
 const brain = container.resolve('brain')
@@ -32,6 +41,7 @@ mcp.addTool({
   timeoutMs: 20_000,
   parameters: memorySchema,
   async execute(memory: Memory) {
+    logger.debug({ name: memory.name }, 'tool: create-memory called')
     try {
       await brain.saveMemory(memory)
     } catch (error) {
@@ -80,6 +90,7 @@ mcp.addTool({
     memoryName: z.string().describe('The name of the memory to retrieve'),
   }),
   async execute({ memoryName }) {
+    logger.debug({ memoryName }, 'tool: retrieve-memory called')
     return {
       content: [
         {
@@ -108,6 +119,7 @@ mcp.addTool({
       .describe('Max number of candidate results to consider before score filtering (default 5)'),
   }),
   async execute({ query, topK }) {
+    logger.debug({ query, topK }, 'tool: search-memory called')
     const results: SearchResult[] = await brain.searchMemories(query, topK)
     return JSON.stringify(results, null, 2)
   },
@@ -117,6 +129,8 @@ mcp.start({
   transportType: 'stdio',
 })
 
+logger.info({ transport: 'stdio' }, 'cog MCP server started')
+
 brain.reconcile().catch((err: unknown) => {
-  process.stderr.write(`[cog] Reconciliation failed: ${err}\n`)
+  logger.error({ err }, 'reconciliation failed')
 })

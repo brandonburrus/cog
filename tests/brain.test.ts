@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, beforeEach, spyOn, afterAll } from 'bun:test'
+import { describe, it, expect, beforeAll, beforeEach, mock, afterAll } from 'bun:test'
 import { Brain } from '../src/brain'
+import type { Logger } from '../src/logger'
 import { Pinecone } from '@pinecone-database/pinecone'
 import { Ollama } from 'ollama'
 import fs from 'node:fs/promises'
@@ -9,12 +10,24 @@ import matter from 'gray-matter'
 const ARTIFACTS_DIR = path.join(import.meta.dir, '.artifacts')
 const INDEX_NAME = 'cog-memory-test'
 
+function makeLogger(): Logger {
+  return {
+    debug: mock(),
+    info: mock(),
+    warn: mock(),
+    error: mock(),
+    fatal: mock(),
+    trace: mock(),
+    child: mock(),
+  } as unknown as Logger
+}
+
 const memoryIndex = new Pinecone().Index({
   host: 'http://localhost:5081',
   name: INDEX_NAME,
 })
 const ollama = new Ollama({ host: 'http://localhost:11434' })
-const brain = new Brain({ memoryIndex, ollama, memoryPath: ARTIFACTS_DIR })
+const brain = new Brain({ memoryIndex, ollama, memoryPath: ARTIFACTS_DIR, logger: makeLogger() })
 
 beforeAll(async () => {
   await fs.mkdir(ARTIFACTS_DIR, { recursive: true })
@@ -260,25 +273,25 @@ describe('reconcile', () => {
     expect(afterIds.sort()).toEqual(afterLocal.sort())
   })
 
-  it('logs a completion summary to stderr', async () => {
+  it('logs a completion summary at info level', async () => {
     await brain.saveMemoryMarkdownFile(memoryA)
 
-    const written: string[] = []
-    const spy = spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
-      written.push(String(chunk))
-      return true
+    const testLogger = makeLogger()
+    const testBrain = new Brain({
+      memoryIndex,
+      ollama,
+      memoryPath: ARTIFACTS_DIR,
+      logger: testLogger,
     })
 
-    try {
-      await brain.reconcile()
-    } finally {
-      spy.mockRestore()
-    }
+    await testBrain.reconcile()
 
-    const summary = written.find(line => line.includes('reconcile: complete'))
-    expect(summary).toBeDefined()
-    expect(summary).toContain('+1 upserted')
-    expect(summary).toContain('-0 deleted')
-    expect(summary).toContain('0 errors')
+    const calls = (testLogger.info as ReturnType<typeof mock>).mock.calls
+    const summaryCall = calls.find(([, msg]) => msg === 'reconcile: complete')
+    expect(summaryCall).toBeDefined()
+    const [bindings] = summaryCall!
+    expect((bindings as Record<string, unknown>).upserted).toBe(1)
+    expect((bindings as Record<string, unknown>).deleted).toBe(0)
+    expect((bindings as Record<string, unknown>).errors).toBe(0)
   })
 })

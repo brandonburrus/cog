@@ -38,20 +38,15 @@ bun install
 ollama pull qwen3-embedding:8b
 ```
 
-### 3. Configure environment
+### 3. Configure environment (optional)
 
-Create a `.env` file in the project root (Bun loads it automatically):
-
-```sh
-PINECONE_API_KEY=pclocal
-```
-
-The following variables are optional and show their defaults:
+All variables have sensible defaults and work out of the box with the local Pinecone emulator. Override any of them by creating a `.env` file in the project root (Bun loads it automatically):
 
 | Variable | Default | Description |
 |---|---|---|
 | `MEMORY_PATH` | `~/.config/opencode/memory` | Directory where markdown memory files are stored |
 | `PINECONE_INDEX_NAME` | `cog-memory` | Pinecone index name |
+| `PINECONE_API_KEY` | `pclocal` | Pinecone API key — only needed if using Pinecone cloud |
 | `OLLAMA_EMBEDDING_MODEL` | `qwen3-embedding:8b` | Ollama model used for embeddings |
 | `MEMORY_SEARCH_SCORE_THRESHOLD` | `0.7` | Minimum cosine similarity score for search results (0–1) |
 
@@ -69,7 +64,17 @@ docker run -d \
   pinecone:latest
 ```
 
-### 5. Install in OpenCode (or any MCP client)
+### 5. Install as a local CLI
+
+Install `cog` as a global command so it can be referenced directly in any MCP client config:
+
+```sh
+bun link
+```
+
+This creates a symlink at `~/.bun/bin/cog`. Make sure `~/.bun/bin` is on your `$PATH`.
+
+### 6. Install in OpenCode (or any MCP client)
 
 Add the following to your MCP client config (e.g. `opencode.jsonc`):
 
@@ -78,8 +83,7 @@ Add the following to your MCP client config (e.g. `opencode.jsonc`):
   "mcp": {
     "cog": {
       "type": "local",
-      "command": "bun",
-      "args": ["--cwd", "/path/to/cog", "src/mcp.ts"],
+      "command": "cog",
     }
   }
 }

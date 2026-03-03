@@ -69,11 +69,6 @@ docker run -d \
   pinecone:latest
 ```
 
-> To recreate the container (e.g. after a dimension change):
-> ```sh
-> docker stop pinecone && docker rm pinecone
-> ```
-
 ### 5. Install in OpenCode (or any MCP client)
 
 Add the following to your MCP client config (e.g. `opencode.jsonc`):
@@ -84,7 +79,7 @@ Add the following to your MCP client config (e.g. `opencode.jsonc`):
     "cog": {
       "type": "local",
       "command": "bun",
-      "args": ["/path/to/cog/src/mcp.ts"]
+      "args": ["--cwd", "/path/to/cog", "src/mcp.ts"],
     }
   }
 }

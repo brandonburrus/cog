@@ -85,7 +85,7 @@ docker run -d \
   -e PORT=5081 \
   -e PINECONE_HOST=localhost \
   -e DIMENSION=4096 \
-  pinecone:latest
+  ghcr.io/pinecone-io/pinecone-index:latest
 ```
 
 ### 5. Install as a local CLI

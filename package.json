@@ -20,8 +20,8 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@pinecone-database/pinecone": "^7.1.0",
     "awilix": "^13.0.2",
+    "env-paths": "^4.0.0",
     "fastmcp": "^3.33.0",
     "gray-matter": "^4.0.3",
     "ollama": "^0.6.3",

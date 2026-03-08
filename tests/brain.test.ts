@@ -1,14 +1,13 @@
 import { describe, it, expect, beforeAll, beforeEach, mock, afterAll } from 'bun:test'
 import { Brain } from '../src/brain'
 import type { Logger } from '../src/logger'
-import { Pinecone } from '@pinecone-database/pinecone'
+import { Database } from 'bun:sqlite'
 import { Ollama } from 'ollama'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import matter from 'gray-matter'
 
 const ARTIFACTS_DIR = path.join(import.meta.dir, '.artifacts')
-const INDEX_NAME = 'cog-memory-test'
 
 function makeLogger(): Logger {
   return {
@@ -22,26 +21,24 @@ function makeLogger(): Logger {
   } as unknown as Logger
 }
 
-const memoryIndex = new Pinecone().Index({
-  host: 'http://localhost:5081',
-  name: INDEX_NAME,
-})
+const testDb = new Database(':memory:')
 const ollama = new Ollama({ host: 'http://localhost:11434' })
-const brain = new Brain({ memoryIndex, ollama, memoryPath: ARTIFACTS_DIR, logger: makeLogger() })
+const brain = new Brain({ db: testDb, ollama, memoryPath: ARTIFACTS_DIR, logger: makeLogger() })
 
 beforeAll(async () => {
   await fs.mkdir(ARTIFACTS_DIR, { recursive: true })
+  brain.initDb()
 })
 
 afterAll(async () => {
-  await memoryIndex.deleteAll()
+  testDb.close()
   const files = await fs.readdir(ARTIFACTS_DIR)
   await Promise.all(files.map(f => fs.rm(path.join(ARTIFACTS_DIR, f))))
   await fs.rmdir(ARTIFACTS_DIR)
 })
 
 beforeEach(async () => {
-  await memoryIndex.deleteAll()
+  testDb.exec('DELETE FROM embeddings')
   const files = await fs.readdir(ARTIFACTS_DIR)
   await Promise.all(files.map(f => fs.rm(path.join(ARTIFACTS_DIR, f))))
 })
@@ -144,7 +141,7 @@ describe('searchMemories', () => {
   })
 
   it('returns empty array when index is empty', async () => {
-    // beforeEach already calls deleteAll
+    // beforeEach already clears the DB
     const results = await brain.searchMemories('typescript type errors')
     expect(results).toEqual([])
   })
@@ -187,39 +184,39 @@ describe('reconcile', () => {
     content: 'Content of reconcile memory C: API rate limiting approaches and backoff strategies.',
   }
 
-  it('upserts local-only memories into Pinecone', async () => {
-    // Write markdown files locally but skip Pinecone
+  it('upserts local-only memories into SQLite', async () => {
+    // Write markdown files locally but skip SQLite
     await brain.saveMemoryMarkdownFile(memoryA)
     await brain.saveMemoryMarkdownFile(memoryB)
 
-    // Pinecone should be empty before reconcile
-    const beforeIds = await brain.listPineconeVectorIds()
+    // SQLite should be empty before reconcile
+    const beforeIds = brain.listVectorIds()
     expect(beforeIds).toHaveLength(0)
 
     await brain.reconcile()
 
-    // Both memories should now be searchable in Pinecone
-    const afterIds = await brain.listPineconeVectorIds()
+    // Both memories should now be in SQLite
+    const afterIds = brain.listVectorIds()
     expect(afterIds).toContain(memoryA.name)
     expect(afterIds).toContain(memoryB.name)
     expect(afterIds).toHaveLength(2)
   })
 
-  it('deletes Pinecone-only vectors that have no local file', async () => {
+  it('deletes SQLite-only vectors that have no local file', async () => {
     // Save to both stores normally, then delete the local file to simulate drift
     await brain.saveMemory(memoryA)
     await fs.rm(path.join(ARTIFACTS_DIR, `${memoryA.name}.md`))
 
-    // Pinecone has the vector but local file is gone
-    const beforeIds = await brain.listPineconeVectorIds()
+    // SQLite has the vector but local file is gone
+    const beforeIds = brain.listVectorIds()
     expect(beforeIds).toContain(memoryA.name)
     const localBefore = await brain.listLocalMemoryNames()
     expect(localBefore).toHaveLength(0)
 
     await brain.reconcile()
 
-    // Orphaned vector should be removed from Pinecone
-    const afterIds = await brain.listPineconeVectorIds()
+    // Orphaned vector should be removed from SQLite
+    const afterIds = brain.listVectorIds()
     expect(afterIds).not.toContain(memoryA.name)
     expect(afterIds).toHaveLength(0)
   })
@@ -232,25 +229,25 @@ describe('reconcile', () => {
       brain.saveMemory(memoryC),
     ])
 
-    const beforeIds = (await brain.listPineconeVectorIds()).sort()
+    const beforeIds = brain.listVectorIds().sort()
     const beforeLocal = (await brain.listLocalMemoryNames()).sort()
     expect(beforeIds).toEqual(beforeLocal)
 
     await brain.reconcile()
 
     // Both stores should be unchanged
-    const afterIds = (await brain.listPineconeVectorIds()).sort()
+    const afterIds = brain.listVectorIds().sort()
     const afterLocal = (await brain.listLocalMemoryNames()).sort()
     expect(afterIds).toEqual(beforeIds)
     expect(afterLocal).toEqual(beforeLocal)
   })
 
-  it('handles mixed drift: upserts local-only and deletes Pinecone-only in one pass', async () => {
-    // memoryA: in Pinecone only (local file deleted after save)
+  it('handles mixed drift: upserts local-only and deletes SQLite-only in one pass', async () => {
+    // memoryA: in SQLite only (local file deleted after save)
     await brain.saveMemory(memoryA)
     await fs.rm(path.join(ARTIFACTS_DIR, `${memoryA.name}.md`))
 
-    // memoryB: local only (saved to disk, not Pinecone)
+    // memoryB: local only (saved to disk, not SQLite)
     await brain.saveMemoryMarkdownFile(memoryB)
 
     // memoryC: in both stores (in sync, should be untouched)
@@ -258,18 +255,18 @@ describe('reconcile', () => {
 
     await brain.reconcile()
 
-    const afterIds = await brain.listPineconeVectorIds()
+    const afterIds = brain.listVectorIds()
     const afterLocal = await brain.listLocalMemoryNames()
 
-    // memoryA orphan should be gone from Pinecone
+    // memoryA orphan should be gone from SQLite
     expect(afterIds).not.toContain(memoryA.name)
-    // memoryB should now be in Pinecone
+    // memoryB should now be in SQLite
     expect(afterIds).toContain(memoryB.name)
     // memoryC should still be present in both
     expect(afterIds).toContain(memoryC.name)
     expect(afterLocal).toContain(memoryC.name)
 
-    // Local and Pinecone sets should now match
+    // Local and SQLite sets should now match
     expect(afterIds.sort()).toEqual(afterLocal.sort())
   })
 
@@ -278,7 +275,7 @@ describe('reconcile', () => {
 
     const testLogger = makeLogger()
     const testBrain = new Brain({
-      memoryIndex,
+      db: testDb,
       ollama,
       memoryPath: ARTIFACTS_DIR,
       logger: testLogger,

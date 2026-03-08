@@ -1,4 +1,4 @@
-import type { Pinecone } from '@pinecone-database/pinecone'
+import type { Database } from 'bun:sqlite'
 import type { Ollama } from 'ollama'
 import type { Logger } from './logger'
 import { z } from 'zod'
@@ -41,23 +41,35 @@ export interface SearchResult {
 }
 
 export interface BrainDeps {
-  memoryIndex: ReturnType<Pinecone['Index']>
+  db: Database
   ollama: Ollama
   memoryPath: string
   logger: Logger
 }
 
 export class Brain {
-  private readonly memoryIndex: BrainDeps['memoryIndex']
+  private readonly db: Database
   private readonly ollama: BrainDeps['ollama']
   private readonly memoryPath: BrainDeps['memoryPath']
   private readonly logger: Logger
 
-  constructor({ memoryIndex, ollama, memoryPath, logger }: BrainDeps) {
-    this.memoryIndex = memoryIndex
+  constructor({ db, ollama, memoryPath, logger }: BrainDeps) {
+    this.db = db
     this.ollama = ollama
     this.memoryPath = memoryPath
     this.logger = logger
+  }
+
+  initDb(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS embeddings (
+        id          TEXT PRIMARY KEY,
+        embedding   TEXT NOT NULL,
+        description TEXT,
+        keywords    TEXT
+      )
+    `)
+    this.logger.debug('SQLite embeddings table initialized')
   }
 
   async saveMemoryMarkdownFile(memory: Memory): Promise<void> {
@@ -87,24 +99,23 @@ export class Brain {
     return vectors
   }
 
-  async saveMemoryToPinecone(memory: Memory): Promise<void> {
-    await this.memoryIndex.upsert({
-      records: [
-        {
-          id: memory.name,
-          values: await this.createMemoryEmbeddingVectors(memory),
-          metadata: {
-            description: memory.description,
-            keywords: memory.keywords?.join(',') ?? '',
-          },
-        },
-      ],
-    })
-    this.logger.debug({ name: memory.name }, 'memory upserted to Pinecone')
+  async saveMemoryToDb(memory: Memory): Promise<void> {
+    const vectors = await this.createMemoryEmbeddingVectors(memory)
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO embeddings (id, embedding, description, keywords) VALUES (?, ?, ?, ?)',
+      )
+      .run(
+        memory.name,
+        JSON.stringify(vectors),
+        memory.description ?? null,
+        memory.keywords?.join(',') ?? null,
+      )
+    this.logger.debug({ name: memory.name }, 'memory upserted to SQLite')
   }
 
   async saveMemory(memory: Memory): Promise<void> {
-    await Promise.all([this.saveMemoryMarkdownFile(memory), this.saveMemoryToPinecone(memory)])
+    await Promise.all([this.saveMemoryMarkdownFile(memory), this.saveMemoryToDb(memory)])
     this.logger.debug({ name: memory.name }, 'memory saved')
   }
 
@@ -146,32 +157,22 @@ export class Brain {
     }
   }
 
-  async listPineconeVectorIds(): Promise<string[]> {
-    const ids: string[] = []
-    let paginationToken: string | undefined
-
-    do {
-      const response = await this.memoryIndex.listPaginated({ paginationToken })
-      for (const item of response.vectors ?? []) {
-        if (item.id) ids.push(item.id)
-      }
-      paginationToken = response.pagination?.next
-    } while (paginationToken)
-
-    return ids
+  listVectorIds(): string[] {
+    const rows = this.db.prepare('SELECT id FROM embeddings').all() as { id: string }[]
+    return rows.map(r => r.id)
   }
 
   async reconcile(): Promise<void> {
-    const [localNames, pineconeIds] = await Promise.all([
+    const [localNames, vectorIds] = await Promise.all([
       this.listLocalMemoryNames(),
-      this.listPineconeVectorIds(),
+      Promise.resolve(this.listVectorIds()),
     ])
 
     const localSet = new Set(localNames)
-    const pineconeSet = new Set(pineconeIds)
+    const vectorSet = new Set(vectorIds)
 
-    const toUpsert = localNames.filter(name => !pineconeSet.has(name))
-    const toDelete = pineconeIds.filter(id => !localSet.has(id))
+    const toUpsert = localNames.filter(name => !vectorSet.has(name))
+    const toDelete = vectorIds.filter(id => !localSet.has(id))
 
     this.logger.info({ toUpsert: toUpsert.length, toDelete: toDelete.length }, 'reconcile started')
 
@@ -182,7 +183,7 @@ export class Brain {
     for (const name of toUpsert) {
       try {
         const memory = await this.retrieveMemoryByName(name)
-        await this.saveMemoryToPinecone(memory)
+        await this.saveMemoryToDb(memory)
         upserted++
       } catch (err) {
         errors++
@@ -192,12 +193,12 @@ export class Brain {
 
     for (const id of toDelete) {
       try {
-        await this.memoryIndex.deleteOne({ id })
-        this.logger.debug({ id }, 'reconcile: deleted orphaned Pinecone vector (no local file)')
+        this.db.prepare('DELETE FROM embeddings WHERE id = ?').run(id)
+        this.logger.debug({ id }, 'reconcile: deleted orphaned SQLite vector (no local file)')
         deleted++
       } catch (err) {
         errors++
-        this.logger.error({ id, err }, 'reconcile: failed to delete Pinecone vector')
+        this.logger.error({ id, err }, 'reconcile: failed to delete SQLite vector')
       }
     }
 
@@ -209,31 +210,49 @@ export class Brain {
       model: env.OLLAMA_EMBEDDING_MODEL,
       input: query,
     })
-    const vector: Vectors = embedding.embeddings[0]!
-    if (!vector || vector.length === 0) {
+    const queryVector: Vectors = embedding.embeddings[0]!
+    if (!queryVector || queryVector.length === 0) {
       throw new Error('Failed to create embedding vectors for search query')
     }
 
-    const results = await this.memoryIndex.query({
-      vector,
-      topK,
-      includeMetadata: true,
-    })
+    const rows = this.db.prepare('SELECT id, embedding FROM embeddings').all() as {
+      id: string
+      embedding: string
+    }[]
 
-    const matches = (results.matches ?? [])
-      .filter(m => (m.score ?? 0) >= env.MEMORY_SEARCH_SCORE_THRESHOLD)
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    const scored = rows
+      .map(row => ({
+        id: row.id,
+        score: this.cosineSimilarity(queryVector, JSON.parse(row.embedding) as number[]),
+      }))
+      .filter(r => r.score >= env.MEMORY_SEARCH_SCORE_THRESHOLD)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
 
     const searchResults: SearchResult[] = []
-    for (const match of matches) {
+    for (const match of scored) {
       const memory = await this.retrieveMemoryByName(match.id)
       searchResults.push({
         name: memory.name,
         keywords: memory.keywords ?? [],
-        score: match.score ?? 0,
+        score: match.score,
         content: memory.content,
       })
     }
     return searchResults
+  }
+
+  private cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0
+    let normA = 0
+    let normB = 0
+    const len = Math.min(a.length, b.length)
+    for (let i = 0; i < len; i++) {
+      dot += a[i]! * b[i]!
+      normA += a[i]! * a[i]!
+      normB += b[i]! * b[i]!
+    }
+    const denom = Math.sqrt(normA) * Math.sqrt(normB)
+    return denom === 0 ? 0 : dot / denom
   }
 }

@@ -1,34 +1,41 @@
 #!/usr/bin/env bun
 import { FastMCP } from 'fastmcp'
 import { createContainer, asValue, asClass } from 'awilix'
-import { Pinecone } from '@pinecone-database/pinecone'
+import { Database } from 'bun:sqlite'
 import { Ollama } from 'ollama'
+import envPaths from 'env-paths'
+import fs from 'node:fs'
+import path from 'node:path'
 import { Brain, memorySchema, type Memory, type SearchResult } from './brain'
 import { env } from './env'
 import { logger } from './logger'
 import z from 'zod'
 
-logger.debug(
-  { pineconeHost: env.PINECONE_HOST, index: env.PINECONE_INDEX_NAME },
-  'initializing Pinecone client',
-)
-const memoryIndex = new Pinecone().Index({
-  name: env.PINECONE_INDEX_NAME,
-  host: env.PINECONE_HOST,
-})
+const dataDir = envPaths('cog', { suffix: '' }).data
+fs.mkdirSync(dataDir, { recursive: true })
+const db = new Database(path.join(dataDir, 'cog.db'))
+
+const cleanup = () => {
+  db.close()
+  process.exit(0)
+}
+process.on('SIGTERM', cleanup)
+process.on('SIGINT', cleanup)
 
 logger.debug({ host: 'http://localhost:11434' }, 'initializing Ollama client')
 const ollama = new Ollama({ host: 'http://localhost:11434' })
 
 const container = createContainer<{ brain: Brain }>()
 container.register({
-  memoryIndex: asValue(memoryIndex),
+  db: asValue(db),
   ollama: asValue(ollama),
   memoryPath: asValue(env.MEMORY_PATH.replace('~', process.env.HOME ?? '')),
   logger: asValue(logger),
   brain: asClass(Brain).singleton(),
 })
 const brain = container.resolve('brain')
+
+brain.initDb()
 
 const mcp = new FastMCP({
   name: 'cog',

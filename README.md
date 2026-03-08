@@ -30,8 +30,8 @@ Commands are slash-commands that run as subtasks.
 
 1. An agent calls `create-memory` with a name, description, keywords, and content
 2. Ollama generates an embedding vector for the memory's description
-3. The vector is upserted into a local SQLite database; the full content is written to a local markdown file
-4. Later, `search-memory` embeds a natural language query and retrieves the most relevant memories by cosine similarity
+3. The vector is stored as a native `float32` BLOB in a [`sqlite-vec`](https://alexgarcia.xyz/sqlite-vec/) virtual table; the full content is written to a local markdown file
+4. Later, `search-memory` embeds a natural language query and runs an in-database KNN query to retrieve the most relevant memories by cosine similarity
 5. `retrieve-memory` fetches a specific memory by name via the `memory://` resource template
 6. On startup, cog reconciles the markdown files and SQLite index — upserts any file-only memories, removes any orphaned vectors
 
@@ -47,6 +47,7 @@ Commands are slash-commands that run as subtasks.
 
 - [Bun](https://bun.sh) — runtime and package manager
 - [Ollama](https://ollama.com) — local embedding model server
+- **macOS only:** Homebrew sqlite3 (`brew install sqlite3`) — the macOS system SQLite does not support loadable extensions, which `sqlite-vec` requires
 
 ## Setup
 
@@ -70,7 +71,7 @@ All variables have sensible defaults and work out of the box. Override any of th
 |---|---|---|
 | `MEMORY_PATH` | `~/.config/opencode/memory` | Directory where markdown memory files are stored |
 | `OLLAMA_EMBEDDING_MODEL` | `qwen3-embedding:8b` | Ollama model used for embeddings |
-| `MEMORY_SEARCH_SCORE_THRESHOLD` | `0.75` | Minimum cosine similarity score for search results (0–1) |
+| `MEMORY_SEARCH_SCORE_THRESHOLD` | `0.65` | Minimum cosine similarity score for search results (0–1) |
 | `LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
 
 ### 4. Install as a local CLI
@@ -103,7 +104,7 @@ Add the following to your MCP client config (e.g. `opencode.jsonc`):
 Cog uses two stores that are kept in sync automatically:
 
 - **Markdown files** (`$MEMORY_PATH/*.md`) — human-readable and hand-editable. YAML frontmatter carries the name, description, and keywords; the body is the memory content.
-- **SQLite database** (`~/.local/share/cog/cog.db`) — stores embedding vectors as JSON blobs for in-process cosine similarity search.
+- **SQLite database** (`~/.local/share/cog/cog.db`) — stores embedding vectors as native `float32` BLOBs in a `sqlite-vec` virtual table for in-database KNN search.
 
 Files edited or added outside of cog are picked up on the next startup via reconciliation.
 

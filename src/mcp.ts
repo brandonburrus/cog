@@ -3,17 +3,26 @@ import { FastMCP } from 'fastmcp'
 import { createContainer, asValue, asClass } from 'awilix'
 import { Database } from 'bun:sqlite'
 import { Ollama } from 'ollama'
+import * as sqliteVec from 'sqlite-vec'
 import envPaths from 'env-paths'
 import fs from 'node:fs'
 import path from 'node:path'
+import { platform } from 'node:os'
 import { Brain, memorySchema, type Memory, type SearchResult } from './brain'
 import { env } from './env'
 import { logger } from './logger'
 import z from 'zod'
 
+if (platform() === 'darwin') {
+  const arm64 = '/opt/homebrew/opt/sqlite3/lib/libsqlite3.dylib'
+  const x86 = '/usr/local/opt/sqlite3/lib/libsqlite3.dylib'
+  Database.setCustomSQLite(fs.existsSync(arm64) ? arm64 : x86)
+}
+
 const dataDir = envPaths('cog', { suffix: '' }).data
 fs.mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'cog.db'))
+sqliteVec.load(db)
 
 const cleanup = () => {
   db.close()
@@ -35,7 +44,7 @@ container.register({
 })
 const brain = container.resolve('brain')
 
-brain.initDb()
+await brain.initDb()
 
 const mcp = new FastMCP({
   name: 'cog',

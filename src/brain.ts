@@ -4,7 +4,7 @@ import type { Logger } from './logger'
 import { z } from 'zod'
 import matter from 'gray-matter'
 import fs from 'node:fs/promises'
-import { env } from './env'
+import { env } from './env.ts'
 
 export const memorySchema = z.object({
   name: z
@@ -52,6 +52,7 @@ export class Brain {
   private readonly ollama: BrainDeps['ollama']
   private readonly memoryPath: BrainDeps['memoryPath']
   private readonly logger: Logger
+  private embeddingDimensions: number | null = null
 
   constructor({ db, ollama, memoryPath, logger }: BrainDeps) {
     this.db = db
@@ -60,16 +61,41 @@ export class Brain {
     this.logger = logger
   }
 
-  initDb(): void {
+  private async getEmbeddingDimensions(): Promise<number> {
+    if (this.embeddingDimensions !== null) return this.embeddingDimensions
+    const probe = await this.ollama.embed({
+      model: env.OLLAMA_EMBEDDING_MODEL,
+      input: 'probe',
+    })
+    const dims = probe.embeddings[0]?.length
+    if (!dims) throw new Error('Failed to determine embedding dimensions from Ollama')
+    this.embeddingDimensions = dims
+    this.logger.debug({ model: env.OLLAMA_EMBEDDING_MODEL, dims }, 'embedding dimensions detected')
+    return dims
+  }
+
+  async initDb(): Promise<void> {
+    const dims = await this.getEmbeddingDimensions()
+
+    // Drop legacy table from pre-sqlite-vec schema if it exists
+    this.db.exec('DROP TABLE IF EXISTS embeddings')
+
+    // Lookup table: maps human-readable memory name → stable integer rowid
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS embeddings (
-        id          TEXT PRIMARY KEY,
-        embedding   TEXT NOT NULL,
-        description TEXT,
-        keywords    TEXT
+      CREATE TABLE IF NOT EXISTS memories (
+        id TEXT PRIMARY KEY
       )
     `)
-    this.logger.debug('SQLite embeddings table initialized')
+
+    // vec0 virtual table: stores float32 BLOB vectors keyed on memories.rowid
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
+        memory_rowid INTEGER PRIMARY KEY,
+        embedding float[${dims}] distance_metric=cosine
+      )
+    `)
+
+    this.logger.debug({ dims }, 'SQLite memories + vec_embeddings tables initialized')
   }
 
   async saveMemoryMarkdownFile(memory: Memory): Promise<void> {
@@ -101,17 +127,25 @@ export class Brain {
 
   async saveMemoryToDb(memory: Memory): Promise<void> {
     const vectors = await this.createMemoryEmbeddingVectors(memory)
+
+    // Step 1: insert into lookup table — no-op if already exists, preserving the rowid
+    this.db.prepare('INSERT OR IGNORE INTO memories (id) VALUES (?)').run(memory.name)
+
+    // Step 2: fetch the stable rowid
+    const row = this.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(memory.name) as {
+      rowid: number
+    }
+
+    // Step 3: remove any existing vector (clean slate before re-insert)
+    this.db.prepare('DELETE FROM vec_embeddings WHERE memory_rowid = ?').run(row.rowid)
+
+    // Step 4: insert fresh vector as native float32 BLOB
+    const blob = new Uint8Array(new Float32Array(vectors).buffer)
     this.db
-      .prepare(
-        'INSERT OR REPLACE INTO embeddings (id, embedding, description, keywords) VALUES (?, ?, ?, ?)',
-      )
-      .run(
-        memory.name,
-        JSON.stringify(vectors),
-        memory.description ?? null,
-        memory.keywords?.join(',') ?? null,
-      )
-    this.logger.debug({ name: memory.name }, 'memory upserted to SQLite')
+      .prepare('INSERT INTO vec_embeddings (memory_rowid, embedding) VALUES (?, ?)')
+      .run(row.rowid, blob)
+
+    this.logger.debug({ name: memory.name, rowid: row.rowid }, 'memory upserted to SQLite')
   }
 
   async saveMemory(memory: Memory): Promise<void> {
@@ -158,7 +192,7 @@ export class Brain {
   }
 
   listVectorIds(): string[] {
-    const rows = this.db.prepare('SELECT id FROM embeddings').all() as { id: string }[]
+    const rows = this.db.prepare('SELECT id FROM memories').all() as { id: string }[]
     return rows.map(r => r.id)
   }
 
@@ -193,7 +227,13 @@ export class Brain {
 
     for (const id of toDelete) {
       try {
-        this.db.prepare('DELETE FROM embeddings WHERE id = ?').run(id)
+        // Delete vector first (FK-style discipline), then the lookup row
+        this.db
+          .prepare(
+            'DELETE FROM vec_embeddings WHERE memory_rowid = (SELECT rowid FROM memories WHERE id = ?)',
+          )
+          .run(id)
+        this.db.prepare('DELETE FROM memories WHERE id = ?').run(id)
         this.logger.debug({ id }, 'reconcile: deleted orphaned SQLite vector (no local file)')
         deleted++
       } catch (err) {
@@ -215,18 +255,23 @@ export class Brain {
       throw new Error('Failed to create embedding vectors for search query')
     }
 
-    const rows = this.db.prepare('SELECT id, embedding FROM embeddings').all() as {
-      id: string
-      embedding: string
-    }[]
+    // Oversample (topK * 3) so the score threshold has candidates to filter from
+    const queryBlob = new Uint8Array(new Float32Array(queryVector).buffer)
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, v.distance
+         FROM vec_embeddings v
+         JOIN memories m ON m.rowid = v.memory_rowid
+         WHERE v.embedding MATCH ?
+           AND k = ?
+         ORDER BY v.distance`,
+      )
+      .all(queryBlob, topK * 3) as { id: string; distance: number }[]
 
+    // Convert cosine distance [0, 2] → cosine similarity [−1, 1], apply threshold, slice
     const scored = rows
-      .map(row => ({
-        id: row.id,
-        score: this.cosineSimilarity(queryVector, JSON.parse(row.embedding) as number[]),
-      }))
+      .map(r => ({ id: r.id, score: 1 - r.distance }))
       .filter(r => r.score >= env.MEMORY_SEARCH_SCORE_THRESHOLD)
-      .sort((a, b) => b.score - a.score)
       .slice(0, topK)
 
     const searchResults: SearchResult[] = []
@@ -240,19 +285,5 @@ export class Brain {
       })
     }
     return searchResults
-  }
-
-  private cosineSimilarity(a: number[], b: number[]): number {
-    let dot = 0
-    let normA = 0
-    let normB = 0
-    const len = Math.min(a.length, b.length)
-    for (let i = 0; i < len; i++) {
-      dot += a[i]! * b[i]!
-      normA += a[i]! * a[i]!
-      normB += b[i]! * b[i]!
-    }
-    const denom = Math.sqrt(normA) * Math.sqrt(normB)
-    return denom === 0 ? 0 : dot / denom
   }
 }

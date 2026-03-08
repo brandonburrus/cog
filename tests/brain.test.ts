@@ -3,9 +3,12 @@ import { Brain } from '../src/brain'
 import type { Logger } from '../src/logger'
 import { Database } from 'bun:sqlite'
 import { Ollama } from 'ollama'
+import * as sqliteVec from 'sqlite-vec'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
 import matter from 'gray-matter'
+import { platform } from 'node:os'
 
 const ARTIFACTS_DIR = path.join(import.meta.dir, '.artifacts')
 
@@ -21,13 +24,20 @@ function makeLogger(): Logger {
   } as unknown as Logger
 }
 
+if (platform() === 'darwin') {
+  const arm64 = '/opt/homebrew/opt/sqlite3/lib/libsqlite3.dylib'
+  const x86 = '/usr/local/opt/sqlite3/lib/libsqlite3.dylib'
+  Database.setCustomSQLite(fsSync.existsSync(arm64) ? arm64 : x86)
+}
+
 const testDb = new Database(':memory:')
+sqliteVec.load(testDb)
 const ollama = new Ollama({ host: 'http://localhost:11434' })
 const brain = new Brain({ db: testDb, ollama, memoryPath: ARTIFACTS_DIR, logger: makeLogger() })
 
 beforeAll(async () => {
   await fs.mkdir(ARTIFACTS_DIR, { recursive: true })
-  brain.initDb()
+  await brain.initDb()
 })
 
 afterAll(async () => {
@@ -38,7 +48,8 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
-  testDb.exec('DELETE FROM embeddings')
+  testDb.exec('DELETE FROM vec_embeddings')
+  testDb.exec('DELETE FROM memories')
   const files = await fs.readdir(ARTIFACTS_DIR)
   await Promise.all(files.map(f => fs.rm(path.join(ARTIFACTS_DIR, f))))
 })

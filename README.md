@@ -12,8 +12,8 @@ Skills are loaded on demand and inject guided workflows into the agent's context
 
 | Skill | Description |
 |---|---|
-| `cog-memorize` | Distills something valuable from the current conversation into a well-formed memory entry and saves it. Use after a non-obvious solution, architectural decision, or user preference surfaces. |
-| `cog-recollect` | Searches long-term memory for relevant context. Use liberally at the start of tasks or when encountering patterns that might have been worked on before. |
+| `cog-create-memory` | Proactively captures useful information as long-term memories during any task — use when you discover user preferences, non-obvious solutions, reusable patterns, or decisions worth remembering. Saves automatically without prompting the user. |
+| `cog-recollect` | Searches long-term memory for context relevant to the current task. Use liberally at the start of tasks, when encountering unfamiliar patterns, or whenever past sessions might hold useful context. Always asks before loading full memory content. |
 
 ### Commands
 
